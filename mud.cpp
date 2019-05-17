@@ -172,7 +172,7 @@ int main(int argc, char *argv[]) {
         if ((samples * nchans) != (static_cast<size_t>(infile.tellg()) - static_cast<size_t>(headlen))) {
             throw std::logic_error("did not read an integer number of samples. Is the input file corrupted?");
         }
-        std::cout << "Read " << samples << "time samples\n";
+        std::cout << "Read " << samples << " time samples\n";
         infile.seekg(headlen, infile.beg);
 
         // NOTE: Check if we have enough samples to corrupt what user has requested
@@ -190,15 +190,17 @@ int main(int argc, char *argv[]) {
         size_t net_read_bytes = net_samples_length * nchans * nbits / 8;
         // NOTE: Read the chunk of the data to be network corrupted
         unsigned char *net_data = new unsigned char[net_read_bytes];
-        infile.seekg(net_skip_bytes, infile.beg);
+        infile.seekg(headlen + net_skip_bytes, infile.beg);
         infile.read(reinterpret_cast<char*>(net_data), net_read_bytes);
 
         // NOTE: Very rough estimate of how many packets were sent in order to produce what we have just read
-        size_t total_packets = net_samples_length / TPACKET * nchans / FPACKET;
-        size_t corrupted_packets = static_cast<size_t>(inconfig.netperc * total_packets);
+        size_t time_packets = net_samples_length / TPACKET;
+        size_t freq_packets = nchans / FPACKET;
+        size_t total_packets = time_packets * freq_packets;
+        size_t corrupted_packets = static_cast<size_t>(inconfig.netperc / 100.0 * total_packets);
 
-        std::cout << "There are a total of " << total_packets << " in the requested chunk\n"
-                    << "Will corrupt " << corrupted_packets << " out of those (" << inconfig.netperc << "%\n";
+        std::cout << "There are a total of " << total_packets << " packets in the requested chunk\n"
+                    << "Will corrupt " << corrupted_packets << " out of those (" << inconfig.netperc << "%)\n";
 
         // NOTE: 'Choose' which packets to network corrupt
         std::random_device rd;
@@ -208,11 +210,64 @@ int main(int argc, char *argv[]) {
         std::iota(full_packet_id.begin(), full_packet_id.end(), 0);
         std::shuffle(full_packet_id.begin(), full_packet_id.end(), net_mt_gen);
         std::vector<size_t> net_packet_id(full_packet_id.begin(), full_packet_id.begin() + corrupted_packets);
+        std::sort(net_packet_id.begin(), net_packet_id.end());
+
+        for (auto pid : net_packet_id) {
+            std::cout << pid << " ";
+        }
+
+        std::cout << std::endl;
+
+        size_t time_chunk = 0;
+        size_t freq_chunk = 0;
+        size_t time_skip = 0;
+        size_t freq_skip = 0;
+        size_t samp_idx = 0;
 
         // NOTE: Corrupting happens here
         for (size_t ipacket = 0; ipacket < corrupted_packets; ++ipacket) {
-            // NOTE: Just set whatever we read to 0
+            time_chunk = ipacket / freq_packets; 
+            freq_chunk = ipacket % freq_packets;
+
+            freq_skip = freq_chunk * FPACKET;
+            time_skip = time_chunk * TPACKET * nchans;
+
+            for (int itime = 0; itime < TPACKET; ++itime) {
+
+                samp_idx = time_skip + itime * nchans;
+
+                for (int ichan = 0; itime < FPACKET; ++itime) {
+                    net_data[samp_idx] = 0x00;
+                    samp_idx++;
+                }
+
+            }
+
+            std::cout << "Corrupted: " << (float)ipacket / (float)corrupted_packets * 100 << "% of data\r";
+            std::cout.flush();
+
         }
+
+        std::cout << std::endl;
+        std::cout << "Saving the data into file " << outstring << "..." << std::endl;
+        std::ofstream outfile(outstring.c_str(), std::ios_base::binary);
+        if (!outfile) {
+            throw std::runtime_error("cannot open output file " + outstring); 
+        }
+
+        unsigned char *tmp_buff = new unsigned char[TPACKET * FPACKET];
+        infile.seekg(0, infile.beg);
+        do {
+            infile.read(reinterpret_cast<char*>(tmp_buff), TPACKET * FPACKET);
+            outfile.write(reinterpret_cast<char*>(tmp_buff), infile.gcount());
+        } while (infile.gcount() > 0);
+
+        outfile.seekp(headlen + net_skip_bytes, infile.beg);
+        outfile.write(reinterpret_cast<char*>(net_data), net_read_bytes);
+        outfile.close();
+
+        delete [] tmp_buff;
+
 
     } catch (const std::exception &exc) {
         std::cerr << "Something went wrong: " << exc.what() << std::endl;
