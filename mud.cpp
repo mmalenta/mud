@@ -224,19 +224,23 @@ int main(int argc, char *argv[]) {
         size_t freq_skip = 0;
         size_t samp_idx = 0;
 
+        size_t pid = 0;
         // NOTE: Corrupting happens here
         for (size_t ipacket = 0; ipacket < corrupted_packets; ++ipacket) {
-            time_chunk = ipacket / freq_packets; 
-            freq_chunk = ipacket % freq_packets;
+
+            pid = net_packet_id.at(ipacket);
+
+            time_chunk = pid / freq_packets; 
+            freq_chunk = pid % freq_packets;
 
             freq_skip = freq_chunk * FPACKET;
-            time_skip = time_chunk * TPACKET * nchans;
+            time_skip = time_chunk * TPACKET * nchans + freq_skip;
 
             for (int itime = 0; itime < TPACKET; ++itime) {
 
                 samp_idx = time_skip + itime * nchans;
 
-                for (int ichan = 0; itime < FPACKET; ++itime) {
+                for (int ichan = 0; ichan < FPACKET; ++ichan) {
                     net_data[samp_idx] = 0x00;
                     samp_idx++;
                 }
