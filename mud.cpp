@@ -11,8 +11,9 @@
 
 #include "boost/program_options.hpp"
 
-#define TPACKET 128
-#define FPACKET 64
+#define TPACKET 128 // single packet length in time samples
+#define FPACKET 64 // single packet width in frequency channels
+#define FBAND 64 // single band width in  freqyency channels - this may be a wrong assumption
 
 namespace po = boost::program_options;
 
@@ -32,6 +33,9 @@ struct Config {
 
     bool netrand;
     bool lvrand;
+
+    bool network;
+    bool levels;
 };
 
 void read_config(int argc, char *argv[], Config &inconfig) {
@@ -55,6 +59,7 @@ void read_config(int argc, char *argv[], Config &inconfig) {
 
     po::options_description levels("Levels");
     levels.add_options()
+                // TODO: Should level mismatch be present across the whole file?
                 ("lvstart", po::value<double>(&inconfig.lvstart), "levels mismatch start (seconds)")
                 ("lvlen", po::value<double>(&inconfig.lvlen), "levels mismatch length (seconds)")
                 ("lvoff", po::value<double>(&inconfig.lvoff), "levels offset")
@@ -76,10 +81,22 @@ void read_config(int argc, char *argv[], Config &inconfig) {
 
     if (variables.count("help")) {
         std::cout << combined << std::endl;
+        exit(EXIT_SUCCESS);
     }
 
     if (variables.count("version")) {
         std::cout << "MUD, Messing Up the Data, version 0.1.whocares" << std::endl;
+        exit(EXIT_SUCCESS);
+    }
+
+    if (variables.count("netstart") || inconfig.netrand == true) {
+        std::cout << "Turning network packet corruption on...\n";
+        inconfig.network = true;
+    }
+
+    if (variables.count("lvoff") || inconfig.lvrand == true) {
+        std::cout << "Turning level corruption on...\n";
+        inconfig.levels = true;
     }
 
     if (!variables.count("input")) {
@@ -175,102 +192,112 @@ int main(int argc, char *argv[]) {
         std::cout << "Read " << samples << " time samples\n";
         infile.seekg(headlen, infile.beg);
 
-        // NOTE: Check if we have enough samples to corrupt what user has requested
-        // NOTE: Make sure we start corrupting the data at the boundary of what is sent in a single packet
-        size_t net_samples_start = static_cast<size_t>((inconfig.netstart / tsamp) / static_cast<float>(TPACKET)) * TPACKET;
-        // NOTE: Make sure the length we corrupt is the multuiple of number of time samples we sent in a single packet
-        size_t net_samples_length = static_cast<size_t>(((inconfig.netlen / tsamp) + static_cast<float>(TPACKET)) / static_cast<float>(TPACKET)) * TPACKET; 
-        size_t net_samples_end = net_samples_start + net_samples_length;
-
-        if (net_samples_end > samples) {
-            throw std::runtime_error("Network packets dropping goes beyond the end of the file! Please review the start time and length");
+        if (inconfig.levels) {
+            std::cout << "Levels corruption...\n";
         }
 
-        size_t net_skip_bytes = net_samples_start * nchans * nbits / 8;
-        size_t net_read_bytes = net_samples_length * nchans * nbits / 8;
-        // NOTE: Read the chunk of the data to be network corrupted
-        unsigned char *net_data = new unsigned char[net_read_bytes];
-        infile.seekg(headlen + net_skip_bytes, infile.beg);
-        infile.read(reinterpret_cast<char*>(net_data), net_read_bytes);
+        if (inconfig.network) {
 
-        // NOTE: Very rough estimate of how many packets were sent in order to produce what we have just read
-        size_t time_packets = net_samples_length / TPACKET;
-        size_t freq_packets = nchans / FPACKET;
-        size_t total_packets = time_packets * freq_packets;
-        size_t corrupted_packets = static_cast<size_t>(inconfig.netperc / 100.0 * total_packets);
+            std::cout << "Network corruption...\n";
 
-        std::cout << "There are a total of " << total_packets << " packets in the requested chunk\n"
-                    << "Will corrupt " << corrupted_packets << " out of those (" << inconfig.netperc << "%)\n";
+            // NOTE: Check if we have enough samples to corrupt what user has requested
+            // NOTE: Make sure we start corrupting the data at the boundary of what is sent in a single packet
+            size_t net_samples_start = static_cast<size_t>((inconfig.netstart / tsamp) / static_cast<float>(TPACKET)) * TPACKET;
+            // NOTE: Make sure the length we corrupt is the multuiple of number of time samples we sent in a single packet
+            size_t net_samples_length = static_cast<size_t>(((inconfig.netlen / tsamp) + static_cast<float>(TPACKET)) / static_cast<float>(TPACKET)) * TPACKET; 
+            size_t net_samples_end = net_samples_start + net_samples_length;
 
-        // NOTE: 'Choose' which packets to network corrupt
-        std::random_device rd;
-        std::mt19937 net_mt_gen(rd());
+            if (net_samples_end > samples) {
+                throw std::runtime_error("Network packets dropping goes beyond the end of the file! Please review the start time and length");
+            }
 
-        std::vector<size_t> full_packet_id(total_packets);
-        std::iota(full_packet_id.begin(), full_packet_id.end(), 0);
-        std::shuffle(full_packet_id.begin(), full_packet_id.end(), net_mt_gen);
-        std::vector<size_t> net_packet_id(full_packet_id.begin(), full_packet_id.begin() + corrupted_packets);
-        std::sort(net_packet_id.begin(), net_packet_id.end());
+            size_t net_skip_bytes = net_samples_start * nchans * nbits / 8;
+            size_t net_read_bytes = net_samples_length * nchans * nbits / 8;
+            // NOTE: Read the chunk of the data to be network corrupted
+            unsigned char *net_data = new unsigned char[net_read_bytes];
+            infile.seekg(headlen + net_skip_bytes, infile.beg);
+            infile.read(reinterpret_cast<char*>(net_data), net_read_bytes);
 
-        for (auto pid : net_packet_id) {
-            std::cout << pid << " ";
-        }
+            // NOTE: Very rough estimate of how many packets were sent in order to produce what we have just read
+            size_t time_packets = net_samples_length / TPACKET;
+            size_t freq_packets = nchans / FPACKET;
+            size_t total_packets = time_packets * freq_packets;
+            size_t corrupted_packets = static_cast<size_t>(inconfig.netperc / 100.0 * total_packets);
 
-        std::cout << std::endl;
+            std::cout << "There are a total of " << total_packets << " packets in the requested chunk\n"
+                        << "Will corrupt " << corrupted_packets << " out of those (" << inconfig.netperc << "%)\n";
 
-        size_t time_chunk = 0;
-        size_t freq_chunk = 0;
-        size_t time_skip = 0;
-        size_t freq_skip = 0;
-        size_t samp_idx = 0;
+            // NOTE: 'Choose' which packets to network corrupt
+            std::random_device rd;
+            std::mt19937 net_mt_gen(rd());
 
-        size_t pid = 0;
-        // NOTE: Corrupting happens here
-        for (size_t ipacket = 0; ipacket < corrupted_packets; ++ipacket) {
+            std::vector<size_t> full_packet_id(total_packets);
+            std::iota(full_packet_id.begin(), full_packet_id.end(), 0);
+            std::shuffle(full_packet_id.begin(), full_packet_id.end(), net_mt_gen);
+            std::vector<size_t> net_packet_id(full_packet_id.begin(), full_packet_id.begin() + corrupted_packets);
+            std::sort(net_packet_id.begin(), net_packet_id.end());
 
-            pid = net_packet_id.at(ipacket);
+            for (auto pid : net_packet_id) {
+                std::cout << pid << " ";
+            }
 
-            time_chunk = pid / freq_packets; 
-            freq_chunk = pid % freq_packets;
+            std::cout << std::endl;
 
-            freq_skip = freq_chunk * FPACKET;
-            time_skip = time_chunk * TPACKET * nchans + freq_skip;
+            size_t time_chunk = 0;
+            size_t freq_chunk = 0;
+            size_t time_skip = 0;
+            size_t freq_skip = 0;
+            size_t samp_idx = 0;
 
-            for (int itime = 0; itime < TPACKET; ++itime) {
+            size_t pid = 0;
+            // NOTE: Corrupting happens here
+            for (size_t ipacket = 0; ipacket < corrupted_packets; ++ipacket) {
 
-                samp_idx = time_skip + itime * nchans;
+                pid = net_packet_id.at(ipacket);
 
-                for (int ichan = 0; ichan < FPACKET; ++ichan) {
-                    net_data[samp_idx] = 0x00;
-                    samp_idx++;
+                time_chunk = pid / freq_packets; 
+                freq_chunk = pid % freq_packets;
+
+                freq_skip = freq_chunk * FPACKET;
+                time_skip = time_chunk * TPACKET * nchans + freq_skip;
+
+                for (int itime = 0; itime < TPACKET; ++itime) {
+
+                    samp_idx = time_skip + itime * nchans;
+
+                    for (int ichan = 0; ichan < FPACKET; ++ichan) {
+                        net_data[samp_idx] = 0x00;
+                        samp_idx++;
+                    }
+
                 }
+
+                std::cout << "Corrupted: " << (float)(ipacket + 1) / (float)corrupted_packets * 100 << "% of data\r";
+                std::cout.flush();
 
             }
 
-            std::cout << "Corrupted: " << (float)ipacket / (float)corrupted_packets * 100 << "% of data\r";
-            std::cout.flush();
+            std::cout << std::endl;
+            std::cout << "Saving the data into file " << outstring << "..." << std::endl;
+            std::ofstream outfile(outstring.c_str(), std::ios_base::binary);
+            if (!outfile) {
+                throw std::runtime_error("cannot open output file " + outstring); 
+            }
+
+            unsigned char *tmp_buff = new unsigned char[TPACKET * FPACKET];
+            infile.seekg(0, infile.beg);
+            do {
+                infile.read(reinterpret_cast<char*>(tmp_buff), TPACKET * FPACKET);
+                outfile.write(reinterpret_cast<char*>(tmp_buff), infile.gcount());
+            } while (infile.gcount() > 0);
+
+            outfile.seekp(headlen + net_skip_bytes, infile.beg);
+            outfile.write(reinterpret_cast<char*>(net_data), net_read_bytes);
+            outfile.close();
+
+            delete [] tmp_buff;
 
         }
-
-        std::cout << std::endl;
-        std::cout << "Saving the data into file " << outstring << "..." << std::endl;
-        std::ofstream outfile(outstring.c_str(), std::ios_base::binary);
-        if (!outfile) {
-            throw std::runtime_error("cannot open output file " + outstring); 
-        }
-
-        unsigned char *tmp_buff = new unsigned char[TPACKET * FPACKET];
-        infile.seekg(0, infile.beg);
-        do {
-            infile.read(reinterpret_cast<char*>(tmp_buff), TPACKET * FPACKET);
-            outfile.write(reinterpret_cast<char*>(tmp_buff), infile.gcount());
-        } while (infile.gcount() > 0);
-
-        outfile.seekp(headlen + net_skip_bytes, infile.beg);
-        outfile.write(reinterpret_cast<char*>(net_data), net_read_bytes);
-        outfile.close();
-
-        delete [] tmp_buff;
 
 
     } catch (const std::exception &exc) {
